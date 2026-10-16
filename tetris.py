@@ -1,16 +1,31 @@
-import tkinter as tk
-import random
 import os
+import random
+import tkinter as tk
 
 BLOCK_SIZE = 32
+PREVIEW_BLOCK = 22
 GRID_WIDTH = 10
 GRID_HEIGHT = 20
-HIGH_SCORE_FILE = "tetris_highscore.txt"
+NEXT_QUEUE_SIZE = 3
 
-GAME_TICK_RATE = 16
-DAS_DELAY = 160
-ARR_RATE = 32
-SOFT_DROP_RATE = 48
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HIGH_SCORE_FILE = os.path.join(BASE_DIR, "tetris_highscore.txt")
+
+TICK_MS = 16
+DAS_DELAY = 150
+ARR_RATE = 30
+SOFT_DROP_RATE = 40
+LOCK_DELAY = 500
+MAX_LOCK_RESETS = 15
+CLEAR_FLASH_MS = 90
+
+BG = "#1c1c1c"
+BOARD_BG = "#101010"
+GRID_LINE = "#181818"
+BLOCK_EDGE = "#282828"
+TEXT = "#FFFFFF"
+MUTED = "#7a7a7a"
+FLASH = "#FFFFFF"
 
 SHAPES = [
     [[1, 1, 1, 1]],
@@ -19,258 +34,586 @@ SHAPES = [
     [[1, 0, 0], [1, 1, 1]],
     [[0, 0, 1], [1, 1, 1]],
     [[1, 1, 0], [0, 1, 1]],
-    [[0, 1, 1], [1, 1, 0]]
+    [[0, 1, 1], [1, 1, 0]],
 ]
 
 COLORS = [
-    "#00E5E5",  # I-Block: Cyan color
-    "#E5E500",  # O-Block: Yellow colorrrr
-    "#BE00E5",  # T-Block: Purple color
-    "#0040E5",  # J-Block: Deep Blue color
-    "#E58000",  # L-Block: Orange color
-    "#40E500",  # S-Block: Green color
-    "#E50000"   # Z-Block: Red color
+    "#00E5E5",
+    "#E5E500",
+    "#BE00E5",
+    "#0040E5",
+    "#E58000",
+    "#40E500",
+    "#E50000",
 ]
+
+KICKS = [(0, 0), (-1, 0), (1, 0), (0, -1), (-1, -1), (1, -1), (-2, 0), (2, 0), (0, -2)]
+
+LINE_SCORES = [0, 100, 300, 500, 800]
+TETRIS_B2B_SCORE = 1200
+COMBO_SCORE = 50
+SOFT_DROP_SCORE = 1
+HARD_DROP_SCORE = 2
+
+
+class Piece:
+    def __init__(self, index):
+        self.index = index
+        self.shape = [list(row) for row in SHAPES[index]]
+        self.color = COLORS[index]
+        self.x = GRID_WIDTH // 2 - len(self.shape[0]) // 2
+        self.y = 0
+
+    def rotated(self, clockwise=True):
+        if clockwise:
+            return [list(row) for row in zip(*self.shape[::-1])]
+        return [list(row) for row in zip(*self.shape)][::-1]
+
 
 class Tetris:
     def __init__(self, master):
         self.master = master
-        self.master.title("Python Tetris - By Bishal")
-        self.master.configure(bg="#1c1c1c")
+        self.master.title("Python Tetris")
+        self.master.configure(bg=BG)
+        self.master.resizable(False, False)
 
-        self.grid = [[None for _ in range(GRID_WIDTH)] for _ in range(GRID_HEIGHT)]
         self.high_score = self.load_high_score()
-        
-        main_frame = tk.Frame(self.master, bg="#1c1c1c")
-        main_frame.pack(padx=20, pady=20)
+        self.overlay_ids = []
 
-        self.canvas = tk.Canvas(main_frame, width=GRID_WIDTH * BLOCK_SIZE, height=GRID_HEIGHT * BLOCK_SIZE, bg="#101010", highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, padx=(0, 20))
-
-        side_panel = tk.Frame(main_frame, bg="#1c1c1c")
-        side_panel.pack(side=tk.RIGHT)
-        self.setup_side_panel(side_panel)
-        
-        self.master.bind("<KeyPress>", self.handle_key_press)
-        self.master.bind("<KeyRelease>", self.handle_key_release)
+        self.build_ui()
+        self.master.bind("<KeyPress>", self.on_key_press)
+        self.master.bind("<KeyRelease>", self.on_key_release)
         self.master.focus_set()
 
         self.start_game()
+        self.loop()
 
-    def setup_side_panel(self, parent):
-        font_style = ("Consolas", 18, "bold")
-        fg_color, bg_color = "#FFFFFF", "#1c1c1c"
+    def build_ui(self):
+        main = tk.Frame(self.master, bg=BG)
+        main.pack(padx=20, pady=20)
 
-        self.high_score_label = tk.Label(parent, text=f"High Score\n{self.high_score}", font=font_style, fg=fg_color, bg=bg_color, justify=tk.CENTER)
-        self.high_score_label.pack(pady=(0, 40))
-        self.score_label = tk.Label(parent, text="Score\n0", font=font_style, fg=fg_color, bg=bg_color, justify=tk.CENTER)
-        self.score_label.pack(pady=(0, 40))
-        self.level_label = tk.Label(parent, text="Level\n1", font=font_style, fg=fg_color, bg=bg_color, justify=tk.CENTER)
-        self.level_label.pack(pady=(0, 40))
+        left = tk.Frame(main, bg=BG)
+        left.pack(side=tk.LEFT, padx=(0, 20), anchor=tk.N)
 
-        tk.Label(parent, text="Next", font=font_style, fg=fg_color, bg=bg_color).pack()
-        self.next_piece_canvas = tk.Canvas(parent, width=5 * BLOCK_SIZE, height=5 * BLOCK_SIZE, bg="#101010", highlightthickness=0)
-        self.next_piece_canvas.pack(pady=10)
-        
-        tk.Label(parent, text='Credit: Bishal | 2025.8.v1', font=("Consolas", 9), fg="#505050", bg=bg_color).pack(side=tk.BOTTOM, pady=(60, 0))
+        self.make_heading(left, "Hold")
+        self.hold_canvas = tk.Canvas(
+            left,
+            width=5 * PREVIEW_BLOCK,
+            height=4 * PREVIEW_BLOCK,
+            bg=BOARD_BG,
+            highlightthickness=0,
+        )
+        self.hold_canvas.pack(pady=(4, 28))
+
+        self.score_value = self.make_stat(left, "Score")
+        self.level_value = self.make_stat(left, "Level")
+        self.lines_value = self.make_stat(left, "Lines")
+        self.high_value = self.make_stat(left, "Best")
+
+        self.canvas = tk.Canvas(
+            main,
+            width=GRID_WIDTH * BLOCK_SIZE,
+            height=GRID_HEIGHT * BLOCK_SIZE,
+            bg=BOARD_BG,
+            highlightthickness=0,
+        )
+        self.canvas.pack(side=tk.LEFT)
+
+        right = tk.Frame(main, bg=BG)
+        right.pack(side=tk.LEFT, padx=(20, 0), anchor=tk.N)
+
+        self.make_heading(right, "Next")
+        self.next_canvas = tk.Canvas(
+            right,
+            width=5 * PREVIEW_BLOCK,
+            height=(NEXT_QUEUE_SIZE * 3 + 1) * PREVIEW_BLOCK,
+            bg=BOARD_BG,
+            highlightthickness=0,
+        )
+        self.next_canvas.pack(pady=(4, 28))
+
+        controls = (
+            "Left / Right  Move\n"
+            "Down          Soft drop\n"
+            "Space         Hard drop\n"
+            "Up / X        Rotate CW\n"
+            "Z             Rotate CCW\n"
+            "C / Shift     Hold\n"
+            "P / Esc       Pause\n"
+            "R             Restart"
+        )
+        tk.Label(
+            right,
+            text=controls,
+            font=("Consolas", 9),
+            fg=MUTED,
+            bg=BG,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+
+        self.build_board_cells()
+
+    def make_heading(self, parent, text):
+        label = tk.Label(parent, text=text, font=("Consolas", 14, "bold"), fg=TEXT, bg=BG)
+        label.pack(anchor=tk.W)
+        return label
+
+    def make_stat(self, parent, title):
+        tk.Label(parent, text=title, font=("Consolas", 11), fg=MUTED, bg=BG).pack(anchor=tk.W)
+        value = tk.Label(parent, text="0", font=("Consolas", 20, "bold"), fg=TEXT, bg=BG)
+        value.pack(anchor=tk.W, pady=(0, 14))
+        return value
+
+    def build_board_cells(self):
+        board_w = GRID_WIDTH * BLOCK_SIZE
+        board_h = GRID_HEIGHT * BLOCK_SIZE
+        for i in range(1, GRID_WIDTH):
+            self.canvas.create_line(i * BLOCK_SIZE, 0, i * BLOCK_SIZE, board_h, fill=GRID_LINE)
+        for i in range(1, GRID_HEIGHT):
+            self.canvas.create_line(0, i * BLOCK_SIZE, board_w, i * BLOCK_SIZE, fill=GRID_LINE)
+
+        self.cells = []
+        self.cell_state = []
+        for y in range(GRID_HEIGHT):
+            row = []
+            state_row = []
+            for x in range(GRID_WIDTH):
+                x1 = x * BLOCK_SIZE
+                y1 = y * BLOCK_SIZE
+                x2 = x1 + BLOCK_SIZE
+                y2 = y1 + BLOCK_SIZE
+                outer = self.canvas.create_rectangle(
+                    x1, y1, x2, y2, fill="", outline="", width=2, state=tk.HIDDEN
+                )
+                inner = self.canvas.create_rectangle(
+                    x1 + 3, y1 + 3, x2 - 3, y2 - 3,
+                    fill=TEXT, outline="", stipple="gray12", state=tk.HIDDEN,
+                )
+                row.append((outer, inner))
+                state_row.append(None)
+            self.cells.append(row)
+            self.cell_state.append(state_row)
 
     def start_game(self):
-        self.grid = [[None for _ in range(GRID_WIDTH)] for _ in range(GRID_HEIGHT)]
-        self.score, self.level, self.lines_cleared = 0, 1, 0
-        self.gravity_speed, self.game_over = 500, False
-        
-        self.keys_pressed = set()
-        self.das_timer_left, self.das_timer_right, self.soft_drop_timer = 0, 0, 0
+        self.grid = [[None] * GRID_WIDTH for _ in range(GRID_HEIGHT)]
+        self.score = 0
+        self.level = 1
+        self.lines = 0
+        self.combo = -1
+        self.back_to_back = False
+        self.game_over = False
+        self.paused = False
+
+        self.keys = set()
+        self.das = {"Left": 0, "Right": 0}
+        self.arr = {"Left": 0, "Right": 0}
+        self.soft_timer = 0
         self.gravity_timer = 0
+        self.gravity_ms = self.gravity_for_level(1)
 
-        self.score_label.config(text=f"Score\n{self.score}")
-        self.level_label.config(text=f"Level\n{self.level}")
-        
-        self.next_piece = self.get_new_piece()
-        self.new_piece()
-        self.update_game()
+        self.lock_timer = 0
+        self.lock_resets = 0
+        self.lowest_y = 0
 
-    def handle_key_press(self, event):
-        key = event.keysym
-        if self.game_over:
-            if key == 'r': self.start_game()
-            return
-        
-        if key not in self.keys_pressed:
-            self.keys_pressed.add(key)
-            if key == 'Left':
-                self.das_timer_left = 0
-                self.move_piece(-1, 0)
-            elif key == 'Right':
-                self.das_timer_right = 0
-                self.move_piece(1, 0)
-        
-        if key == 'Up': self.rotate_piece()
-        elif key == 'space': self.hard_drop()
+        self.clearing_rows = []
+        self.clear_timer = 0
 
-    def handle_key_release(self, event):
-        key = event.keysym
-        if key in self.keys_pressed:
-            self.keys_pressed.remove(key)
-        if key == 'Left': self.das_timer_left = 0
-        elif key == 'Right': self.das_timer_right = 0
+        self.bag = []
+        self.queue = [self.draw_from_bag() for _ in range(NEXT_QUEUE_SIZE)]
+        self.held = None
+        self.can_hold = True
+        self.current = None
+        self.ghost_y = 0
 
-    def handle_continuous_movement(self, delta_time):
-        if 'Left' in self.keys_pressed:
-            self.das_timer_left += delta_time
-            if self.das_timer_left > DAS_DELAY:
-                self.das_timer_left %= ARR_RATE
-                self.move_piece(-1, 0)
-        
-        if 'Right' in self.keys_pressed:
-            self.das_timer_right += delta_time
-            if self.das_timer_right > DAS_DELAY:
-                self.das_timer_right %= ARR_RATE
-                self.move_piece(1, 0)
-        
-        if 'Down' in self.keys_pressed:
-            self.soft_drop_timer += delta_time
-            if self.soft_drop_timer > SOFT_DROP_RATE:
-                self.soft_drop_timer %= SOFT_DROP_RATE
-                if not self.move_piece(0, 1):
-                    self.lock_piece()
+        self.clear_overlay()
+        self.hold_canvas.delete("all")
+        self.dirty = True
+        self.update_stats()
+        self.spawn_piece()
 
-    def load_high_score(self):
-        if not os.path.exists(HIGH_SCORE_FILE): return 0
-        with open(HIGH_SCORE_FILE, "r") as f:
-            try: return int(f.read())
-            except (ValueError, TypeError): return 0
+    def gravity_for_level(self, level):
+        return max(60, int(600 * (0.85 ** (level - 1))))
 
-    def save_high_score(self):
-        if self.score > self.high_score:
-            self.high_score = self.score
-            with open(HIGH_SCORE_FILE, "w") as f: f.write(str(self.high_score))
-            self.high_score_label.config(text=f"High Score\n{self.high_score}")
+    def draw_from_bag(self):
+        if not self.bag:
+            self.bag = list(range(len(SHAPES)))
+            random.shuffle(self.bag)
+        return self.bag.pop()
 
-    def get_new_piece(self):
-        shape_index = random.randint(0, len(SHAPES) - 1)
-        return {"shape": SHAPES[shape_index], "color": COLORS[shape_index], "x": GRID_WIDTH // 2 - len(SHAPES[shape_index][0]) // 2, "y": 0}
+    def spawn_piece(self, index=None):
+        if index is None:
+            index = self.queue.pop(0)
+            self.queue.append(self.draw_from_bag())
+            self.can_hold = True
+        self.current = Piece(index)
+        self.gravity_timer = 0
+        self.lock_timer = 0
+        self.lock_resets = 0
+        self.lowest_y = 0
+        self.update_ghost()
+        self.draw_preview(self.next_canvas, self.queue)
+        self.dirty = True
+        if self.collides(self.current.shape, self.current.x, self.current.y):
+            self.end_game()
 
-    def new_piece(self):
-        self.current_piece = self.next_piece
-        self.next_piece = self.get_new_piece()
-        self.update_ghost_piece()
-        self.draw_next_piece()
-        if self.check_collision(self.current_piece["shape"], (self.current_piece["x"], self.current_piece["y"])):
-            self.game_over = True
-
-    def check_collision(self, shape, pos):
+    def collides(self, shape, px, py):
         for y, row in enumerate(shape):
             for x, cell in enumerate(row):
-                if cell:
-                    grid_x, grid_y = pos[0] + x, pos[1] + y
-                    if not (0 <= grid_x < GRID_WIDTH and 0 <= grid_y < GRID_HEIGHT and self.grid[grid_y][grid_x] is None):
-                        return True
+                if not cell:
+                    continue
+                gx = px + x
+                gy = py + y
+                if gx < 0 or gx >= GRID_WIDTH or gy < 0 or gy >= GRID_HEIGHT:
+                    return True
+                if self.grid[gy][gx] is not None:
+                    return True
         return False
 
-    def move_piece(self, dx, dy):
-        new_x = self.current_piece["x"] + dx
-        new_y = self.current_piece["y"] + dy
-        if not self.check_collision(self.current_piece["shape"], (new_x, new_y)):
-            self.current_piece["x"], self.current_piece["y"] = new_x, new_y
-            self.update_ghost_piece()
-            return True
-        return False
+    def on_ground(self):
+        return self.collides(self.current.shape, self.current.x, self.current.y + 1)
 
-    def rotate_piece(self):
-        rotated_shape = [list(row) for row in zip(*self.current_piece["shape"][::-1])]
-        if not self.check_collision(rotated_shape, (self.current_piece["x"], self.current_piece["y"])):
-            self.current_piece["shape"] = rotated_shape
-            self.update_ghost_piece()
+    def update_ghost(self):
+        y = self.current.y
+        while not self.collides(self.current.shape, self.current.x, y + 1):
+            y += 1
+        self.ghost_y = y
+
+    def after_successful_move(self, vertical):
+        self.update_ghost()
+        self.dirty = True
+        if vertical:
+            if self.current.y > self.lowest_y:
+                self.lowest_y = self.current.y
+                self.lock_resets = 0
+                self.lock_timer = 0
+        elif self.on_ground() and self.lock_resets < MAX_LOCK_RESETS:
+            self.lock_timer = 0
+            self.lock_resets += 1
+
+    def try_move(self, dx, dy):
+        nx = self.current.x + dx
+        ny = self.current.y + dy
+        if self.collides(self.current.shape, nx, ny):
+            return False
+        self.current.x = nx
+        self.current.y = ny
+        self.after_successful_move(dy != 0)
+        return True
+
+    def rotate(self, clockwise):
+        shape = self.current.rotated(clockwise)
+        for kx, ky in KICKS:
+            nx = self.current.x + kx
+            ny = self.current.y + ky
+            if not self.collides(shape, nx, ny):
+                self.current.shape = shape
+                self.current.x = nx
+                self.current.y = ny
+                self.after_successful_move(False)
+                return True
+        return False
 
     def hard_drop(self):
-        self.current_piece["y"] = self.ghost_piece["y"]
+        distance = self.ghost_y - self.current.y
+        self.current.y = self.ghost_y
+        if distance > 0:
+            self.add_score(distance * HARD_DROP_SCORE)
         self.lock_piece()
 
+    def hold(self):
+        if not self.can_hold:
+            return
+        previous = self.held
+        self.held = self.current.index
+        self.draw_preview(self.hold_canvas, [self.held])
+        if previous is None:
+            self.spawn_piece()
+        else:
+            self.spawn_piece(previous)
+        self.can_hold = False
+
+    def on_key_press(self, event):
+        key = event.keysym
+        if len(key) == 1:
+            key = key.lower()
+        if key in self.keys:
+            return
+        self.keys.add(key)
+
+        if self.game_over:
+            if key == "r":
+                self.start_game()
+            return
+
+        if key in ("p", "Escape"):
+            self.toggle_pause()
+            return
+
+        if self.paused or self.current is None or self.clearing_rows:
+            return
+
+        if key == "Left":
+            self.das["Left"] = 0
+            self.arr["Left"] = ARR_RATE
+            self.try_move(-1, 0)
+        elif key == "Right":
+            self.das["Right"] = 0
+            self.arr["Right"] = ARR_RATE
+            self.try_move(1, 0)
+        elif key == "Down":
+            self.soft_timer = SOFT_DROP_RATE
+        elif key in ("Up", "x"):
+            self.rotate(True)
+        elif key == "z":
+            self.rotate(False)
+        elif key == "space":
+            self.hard_drop()
+        elif key in ("c", "Shift_L", "Shift_R"):
+            self.hold()
+
+    def on_key_release(self, event):
+        key = event.keysym
+        if len(key) == 1:
+            key = key.lower()
+        self.keys.discard(key)
+        if key in self.das:
+            self.das[key] = 0
+            self.arr[key] = 0
+
+    def handle_held_keys(self):
+        for side, dx in (("Left", -1), ("Right", 1)):
+            if side not in self.keys:
+                continue
+            self.das[side] += TICK_MS
+            if self.das[side] < DAS_DELAY:
+                continue
+            self.arr[side] += TICK_MS
+            if self.arr[side] >= ARR_RATE:
+                self.arr[side] -= ARR_RATE
+                self.try_move(dx, 0)
+
+        if "Down" in self.keys:
+            self.soft_timer += TICK_MS
+            if self.soft_timer >= SOFT_DROP_RATE:
+                self.soft_timer -= SOFT_DROP_RATE
+                if self.try_move(0, 1):
+                    self.add_score(SOFT_DROP_SCORE)
+
     def lock_piece(self):
-        for y, row in enumerate(self.current_piece["shape"]):
+        for y, row in enumerate(self.current.shape):
             for x, cell in enumerate(row):
-                if cell: self.grid[self.current_piece["y"] + y][self.current_piece["x"] + x] = self.current_piece["color"]
-        self.clear_lines()
-        self.new_piece()
+                if cell:
+                    self.grid[self.current.y + y][self.current.x + x] = self.current.color
+        self.current = None
+        self.dirty = True
 
-    def clear_lines(self):
-        lines_to_clear = [i for i, row in enumerate(self.grid) if all(row)]
-        cleared_count = len(lines_to_clear)
-        for i in lines_to_clear:
-            del self.grid[i]
-            self.grid.insert(0, [None for _ in range(GRID_WIDTH)])
-        if cleared_count > 0:
-            self.score += [0, 100, 300, 500, 800][cleared_count] * self.level
-            self.lines_cleared += cleared_count
-            self.score_label.config(text=f"Score\n{self.score}")
-            self.update_level()
+        full_rows = [y for y, row in enumerate(self.grid) if all(row)]
+        if full_rows:
+            self.clearing_rows = full_rows
+            self.clear_timer = 0
+        else:
+            self.combo = -1
+            self.spawn_piece()
 
-    def update_level(self):
-        new_level = (self.lines_cleared // 10) + 1
+    def finish_clear(self):
+        count = len(self.clearing_rows)
+        for y in sorted(self.clearing_rows):
+            del self.grid[y]
+            self.grid.insert(0, [None] * GRID_WIDTH)
+        self.clearing_rows = []
+
+        self.combo += 1
+        points = LINE_SCORES[count]
+        if count == 4:
+            if self.back_to_back:
+                points = TETRIS_B2B_SCORE
+            self.back_to_back = True
+        else:
+            self.back_to_back = False
+        points *= self.level
+        if self.combo > 0:
+            points += COMBO_SCORE * self.combo * self.level
+        self.add_score(points)
+
+        self.lines += count
+        new_level = self.lines // 10 + 1
         if new_level > self.level:
             self.level = new_level
-            self.gravity_speed = max(100, 500 - (self.level - 1) * 40)
-            self.level_label.config(text=f"Level\n{self.level}")
+            self.gravity_ms = self.gravity_for_level(self.level)
 
-    def update_ghost_piece(self):
-        self.ghost_piece = self.current_piece.copy()
-        while not self.check_collision(self.ghost_piece["shape"], (self.ghost_piece["x"], self.ghost_piece["y"] + 1)):
-            self.ghost_piece["y"] += 1
+        self.update_stats()
+        self.spawn_piece()
 
-    def draw_block(self, canvas, x, y, color, is_ghost=False):
-        x1, y1, x2, y2 = x * BLOCK_SIZE, y * BLOCK_SIZE, (x + 1) * BLOCK_SIZE, (y + 1) * BLOCK_SIZE
-        if is_ghost:
-            canvas.create_rectangle(x1, y1, x2, y2, fill="", outline=color, width=2)
-        else:
-            canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="#282828", width=2)
-            canvas.create_rectangle(x1 + 3, y1 + 3, x2 - 3, y2 - 3, fill=color, outline="#FFFFFF", width=1, stipple="gray12")
+    def add_score(self, points):
+        self.score += points
+        self.score_value.config(text=str(self.score))
 
-    def draw_board(self):
-        self.canvas.delete("all")
-        for i in range(1, GRID_WIDTH): self.canvas.create_line(i * BLOCK_SIZE, 0, i * BLOCK_SIZE, GRID_HEIGHT * BLOCK_SIZE, fill="#181818")
-        for i in range(1, GRID_HEIGHT): self.canvas.create_line(0, i * BLOCK_SIZE, GRID_WIDTH * BLOCK_SIZE, i * BLOCK_SIZE, fill="#181818")
-        
+    def update_stats(self):
+        self.score_value.config(text=str(self.score))
+        self.level_value.config(text=str(self.level))
+        self.lines_value.config(text=str(self.lines))
+        self.high_value.config(text=str(self.high_score))
+
+    def load_high_score(self):
+        if not os.path.exists(HIGH_SCORE_FILE):
+            return 0
+        try:
+            with open(HIGH_SCORE_FILE, "r") as f:
+                return int(f.read().strip() or 0)
+        except (ValueError, OSError):
+            return 0
+
+    def save_high_score(self):
+        if self.score <= self.high_score:
+            return
+        self.high_score = self.score
+        try:
+            with open(HIGH_SCORE_FILE, "w") as f:
+                f.write(str(self.high_score))
+        except OSError:
+            pass
+        self.high_value.config(text=str(self.high_score))
+
+    def draw_preview(self, canvas, indices):
+        canvas.delete("all")
+        canvas_w = int(canvas["width"])
+        slot_h = 3 * PREVIEW_BLOCK
+        for slot, index in enumerate(indices):
+            shape = SHAPES[index]
+            color = COLORS[index]
+            w = len(shape[0]) * PREVIEW_BLOCK
+            h = len(shape) * PREVIEW_BLOCK
+            ox = (canvas_w - w) / 2
+            oy = slot * slot_h + (slot_h - h) / 2 + PREVIEW_BLOCK / 2
+            for y, row in enumerate(shape):
+                for x, cell in enumerate(row):
+                    if not cell:
+                        continue
+                    x1 = ox + x * PREVIEW_BLOCK
+                    y1 = oy + y * PREVIEW_BLOCK
+                    x2 = x1 + PREVIEW_BLOCK
+                    y2 = y1 + PREVIEW_BLOCK
+                    canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=BLOCK_EDGE, width=2)
+                    canvas.create_rectangle(
+                        x1 + 2, y1 + 2, x2 - 2, y2 - 2,
+                        fill=TEXT, outline="", stipple="gray12",
+                    )
+
+    def render(self):
+        if not self.dirty:
+            return
+        self.dirty = False
+
+        desired = [[("empty", None) for _ in range(GRID_WIDTH)] for _ in range(GRID_HEIGHT)]
         for y, row in enumerate(self.grid):
             for x, color in enumerate(row):
-                if color: self.draw_block(self.canvas, x, y, color)
-        
-        for y, row in enumerate(self.ghost_piece["shape"]):
-            for x, cell in enumerate(row):
-                if cell: self.draw_block(self.canvas, self.ghost_piece["x"] + x, self.ghost_piece["y"] + y, self.ghost_piece["color"], True)
+                if color is not None:
+                    desired[y][x] = ("block", color)
 
-        for y, row in enumerate(self.current_piece["shape"]):
-            for x, cell in enumerate(row):
-                if cell: self.draw_block(self.canvas, self.current_piece["x"] + x, self.current_piece["y"] + y, self.current_piece["color"])
+        for y in self.clearing_rows:
+            for x in range(GRID_WIDTH):
+                desired[y][x] = ("block", FLASH)
 
-    def draw_next_piece(self):
-        self.next_piece_canvas.delete("all")
-        shape = self.next_piece["shape"]
-        start_x = (5 * BLOCK_SIZE - len(shape[0]) * BLOCK_SIZE) / 2
-        start_y = (5 * BLOCK_SIZE - len(shape) * BLOCK_SIZE) / 2
-        for y, row in enumerate(shape):
-            for x, cell in enumerate(row):
-                if cell: self.draw_block(self.next_piece_canvas, start_x / BLOCK_SIZE + x, start_y / BLOCK_SIZE + y, self.next_piece["color"])
+        if self.current is not None:
+            piece = self.current
+            for y, row in enumerate(piece.shape):
+                for x, cell in enumerate(row):
+                    if not cell:
+                        continue
+                    gx = piece.x + x
+                    gy = self.ghost_y + y
+                    if 0 <= gy < GRID_HEIGHT and desired[gy][gx][0] == "empty":
+                        desired[gy][gx] = ("ghost", piece.color)
+            for y, row in enumerate(piece.shape):
+                for x, cell in enumerate(row):
+                    if cell:
+                        desired[piece.y + y][piece.x + x] = ("block", piece.color)
 
-    def update_game(self):
-        if not self.game_over:
-            self.gravity_timer += GAME_TICK_RATE
-            self.handle_continuous_movement(GAME_TICK_RATE)
-            
-            if self.gravity_timer > self.gravity_speed:
-                self.gravity_timer %= self.gravity_speed
-                if not self.move_piece(0, 1):
-                    self.lock_piece()
-            
-            self.draw_board()
-            self.master.after(GAME_TICK_RATE, self.update_game)
+        for y in range(GRID_HEIGHT):
+            for x in range(GRID_WIDTH):
+                state = desired[y][x]
+                if state != self.cell_state[y][x]:
+                    self.cell_state[y][x] = state
+                    self.apply_cell(y, x, state)
+
+    def apply_cell(self, y, x, state):
+        outer, inner = self.cells[y][x]
+        kind, color = state
+        if kind == "block":
+            self.canvas.itemconfig(outer, fill=color, outline=BLOCK_EDGE, state=tk.NORMAL)
+            self.canvas.itemconfig(inner, state=tk.NORMAL)
+        elif kind == "ghost":
+            self.canvas.itemconfig(outer, fill="", outline=color, state=tk.NORMAL)
+            self.canvas.itemconfig(inner, state=tk.HIDDEN)
         else:
-            self.save_high_score()
-            self.canvas.create_rectangle(0, 0, GRID_WIDTH * BLOCK_SIZE, GRID_HEIGHT * BLOCK_SIZE, fill="#000000", stipple="gray50")
-            self.canvas.create_text((GRID_WIDTH * BLOCK_SIZE) / 2, (GRID_HEIGHT * BLOCK_SIZE) / 2 - 40, text="GAME OVER", font=("Consolas", 40, "bold"), fill="white")
-            self.canvas.create_text((GRID_WIDTH * BLOCK_SIZE) / 2, (GRID_HEIGHT * BLOCK_SIZE) / 2 + 20, text="Press 'R' to Restart", font=("Consolas", 16), fill="white")
+            self.canvas.itemconfig(outer, state=tk.HIDDEN)
+            self.canvas.itemconfig(inner, state=tk.HIDDEN)
+
+    def show_overlay(self, title, subtitle):
+        self.clear_overlay()
+        w = GRID_WIDTH * BLOCK_SIZE
+        h = GRID_HEIGHT * BLOCK_SIZE
+        self.overlay_ids.append(
+            self.canvas.create_rectangle(0, 0, w, h, fill="#000000", outline="", stipple="gray50")
+        )
+        self.overlay_ids.append(
+            self.canvas.create_text(w / 2, h / 2 - 30, text=title, font=("Consolas", 36, "bold"), fill=TEXT)
+        )
+        self.overlay_ids.append(
+            self.canvas.create_text(w / 2, h / 2 + 24, text=subtitle, font=("Consolas", 14), fill=TEXT)
+        )
+
+    def clear_overlay(self):
+        for item in self.overlay_ids:
+            self.canvas.delete(item)
+        self.overlay_ids = []
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        if self.paused:
+            self.show_overlay("PAUSED", "Press P to resume")
+        else:
+            self.clear_overlay()
+
+    def end_game(self):
+        self.game_over = True
+        self.save_high_score()
+        self.show_overlay("GAME OVER", "Press R to restart")
+
+    def step(self):
+        if self.clearing_rows:
+            self.clear_timer += TICK_MS
+            if self.clear_timer >= CLEAR_FLASH_MS:
+                self.finish_clear()
+            return
+
+        self.handle_held_keys()
+        if self.current is None:
+            return
+
+        self.gravity_timer += TICK_MS
+        if self.gravity_timer >= self.gravity_ms:
+            self.gravity_timer -= self.gravity_ms
+            self.try_move(0, 1)
+
+        if self.current is None:
+            return
+
+        if self.on_ground():
+            self.lock_timer += TICK_MS
+            if self.lock_timer >= LOCK_DELAY:
+                self.lock_piece()
+        else:
+            self.lock_timer = 0
+
+    def loop(self):
+        if not self.game_over and not self.paused:
+            self.step()
+        self.render()
+        self.master.after(TICK_MS, self.loop)
+
 
 if __name__ == "__main__":
     root = tk.Tk()
-    game = Tetris(root)
+    Tetris(root)
     root.mainloop()
